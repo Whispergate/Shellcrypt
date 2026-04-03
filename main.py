@@ -6,11 +6,15 @@ Shellcrypt: Quality of Life Shellcode Obfuscation Tool
 / - Shellcrypt.py  : Main Program
 /utils/
     - /crypters.py : Encryption, Encoding & Compression Toolkit
+    - /winapi.py   : LZNT1 Compression WinAPI Helper
     - /logging.py  : Logging Helper
 """
 import argparse
 import logging
 import pyfiglet
+
+import yaml
+from os.path import exists
 
 from rich.console import Console
 from rich.theme import Theme
@@ -185,6 +189,13 @@ def main():
         show_banner()
         args = parse_args()
 
+        # --------- Config System ---------
+        config_chain = None
+        if exists("config.yaml"):
+            with open("config.yaml", "r") as f:
+                config = yaml.safe_load(f)
+                config_chain = config.get("chain", None)
+
         # --------- Info-only arguments ---------
         if args.formats:
             print_available_options("formats", OUTPUT_FORMATS)
@@ -225,9 +236,16 @@ def main():
                          -c lznt (--compressors gives a list of valid compressors)""")
             exit()
 
-        Log.logSuccess(f"Output Compression: {args.compress}")
-        Log.logSuccess(f"Output Encryption: {args.encrypt}")
-        Log.logSuccess(f"Output Encoding: {args.encode}")
+        if args.compress != None:
+            Log.logSuccess(f"Output Compression: {args.compress}")
+        
+        if args.encrypt != None:
+            Log.logSuccess(f"Output Encryption: {args.encrypt}")
+        else:
+            Log.logInfo("No encryption found, defaulting to XOR")
+        
+        if args.encode != None:
+            Log.logSuccess(f"Output Encoding: {args.encode}")
 
         key = validate_and_get_key(args.key, args.encrypt)
         Log.logSuccess(f"Using key: {hexlify(key).decode()}")
@@ -247,17 +265,57 @@ def main():
         compressor = Compress()
         encoder = Encode()
 
-        if args.compress:
-            logging.info("Compressing Shellcode")
-            input_bytes = process_compression(input_bytes, args, compressor)
+        # If config.yaml exists and chain is specified, use it
+        if config_chain:
+            for step in config_chain:
+                step_type = step.get("type")
+                method = step.get("method")
+                if step_type == "compress":
+                    Log.logSuccess(f"Output Compression: {method}")
+                    input_bytes = compressor.compress(method, input_bytes)
+                elif step_type == "encrypt":
+                    Log.logSuccess(f"Output Encryption: {method}")
+                    step_key = step.get("key")
+                    step_nonce = step.get("nonce")
+                    import re
+                    def to_hex_str(val):
+                        if val is None:
+                            return None
+                        if isinstance(val, int):
+                            return format(val, 'x')
+                        return str(val)
+                    def validate_hex(val, expected_len, name):
+                        if val is None:
+                            return None
+                        hex_str = to_hex_str(val)
+                        if not re.fullmatch(r'[0-9a-fA-F]+', hex_str):
+                            Log.logError(f"{name} in config.yaml must be a valid hex string.")
+                            exit()
+                        if len(hex_str) != expected_len:
+                            Log.logError(f"{name} in config.yaml must be {expected_len} hex digits ({expected_len//2} bytes). Got {len(hex_str)}.")
+                            exit()
+                        return hex_str
+                    use_key = bytearray.fromhex(validate_hex(step_key, 32, "key")) if step_key else key
+                    use_nonce = bytearray.fromhex(validate_hex(step_nonce, 32, "nonce")) if step_nonce else nonce
+                    input_bytes = cryptor.encrypt(method, input_bytes, use_key, use_nonce)
+                elif step_type == "encode":
+                    Log.logSuccess(f"Output Encoder: {method}")
+                    input_bytes = encoder.encode(method, input_bytes)
+                else:
+                    Log.logError(f"Unknown step type in config: {step_type}")
+                    exit()
+        else:
+            if args.compress:
+                logging.info("Compressing Shellcode")
+                input_bytes = process_compression(input_bytes, args, compressor)
 
-        if args.encrypt:
-            logging.info("Encrypting Shellcode")
-            input_bytes = process_encryption(input_bytes, args, cryptor, key, nonce)
+            if args.encrypt:
+                logging.info("Encrypting Shellcode")
+                input_bytes = process_encryption(input_bytes, args, cryptor, key, nonce)
 
-        if args.encode:
-            logging.info("Encoding Shellcode")
-            input_bytes = process_encoding(input_bytes, args, encoder)
+            if args.encode:
+                logging.info("Encoding Shellcode")
+                input_bytes = process_encoding(input_bytes, args, encoder)
 
         Log.logSuccess(f"Successfully processed input file ({len(input_bytes)} bytes)")
         Log.logInfo("Deobfuscation Routine: Decode -> Decrypt -> Decompress\n")
