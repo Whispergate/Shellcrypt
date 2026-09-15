@@ -79,7 +79,8 @@ class ShellcodeFormatter:
         output = ""
         for array_name, array in arrays.items():
             output += f"var {array_name}: array[{len(array)}, byte] = [\n"
-            output += "\tbyte " + self.__generate_array_contents(array)[1:]
+            contents = self.__generate_array_contents(array).replace("\t", "    ")
+            output += "    byte " + contents[1:]
             output += "\n]\n\n"
         return output
 
