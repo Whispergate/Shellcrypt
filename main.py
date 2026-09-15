@@ -6,15 +6,11 @@ Shellcrypt: Quality of Life Shellcode Obfuscation Tool
 / - Shellcrypt.py  : Main Program
 /utils/
     - /crypters.py : Encryption, Encoding & Compression Toolkit
-    - /winapi.py   : LZNT1 Compression WinAPI Helper
     - /logging.py  : Logging Helper
 """
 import argparse
 import logging
 import pyfiglet
-
-import yaml
-from os.path import exists
 
 from rich.console import Console
 from rich.theme import Theme
@@ -83,7 +79,6 @@ def show_banner():
 
 def parse_args():
     # Parse arguments with additional features
-    # TODO: Add decryption routines in the future
 
     argparser = argparse.ArgumentParser(prog="shellcrypt")
 
@@ -92,7 +87,7 @@ def parse_args():
 
     # Encryption related options
     argparser.add_argument("-e", "--encrypt", default=None, help="Encryption method to use, default None.")
-    argparser.add_argument("--decrypt", action="store_true", help="Enable decryption functionality (not yet implemented).")
+    argparser.add_argument("--decrypt", action="store_true", help="Decrypt mode: Decode -> Decrypt -> Decompress.")
 
     # Encoding related options
     argparser.add_argument("-d", "--encode", default=None, help="Encoding method to use, default None.")
@@ -144,26 +139,42 @@ def validate_input_file(input_file):
         exit()
     Log.logSuccess(f"Input file: '{input_file}'")
 
-def validate_and_get_key(key, encrypt_type):
+REQUIRED_KEY_LENGTHS = {
+    "aes_128": 16,
+    "aes_ecb": 16,
+    "aes_cbc": 16,
+    "chacha20": 32,
+    "salsa20": 32,
+}
+
+def validate_and_get_key(key, encrypt_type, key_length=32):
+    required = REQUIRED_KEY_LENGTHS.get(encrypt_type)
     if key is None:
-        return urandom(32)
+        return urandom(required or key_length)
 
     if len(key) < 2 or len(key) % 2 == 1 or any(i not in hexdigits for i in key):
         Log.logError("Key must be valid byte(s) in hex format (e.g. 4141).")
         exit()
 
-    if encrypt_type == "aes" and len(key) != 32:
-        Log.logError("AES-128 key must be exactly 16 bytes long.")
+    key_bytes = len(key) // 2
+    if required and key_bytes != required:
+        Log.logError(f"{encrypt_type} requires a {required}-byte key (got {key_bytes}).")
         exit()
 
     return bytearray.fromhex(key)
 
-def validate_and_get_nonce(nonce):
+def validate_and_get_nonce(nonce, encrypt_type=None):
     if nonce is None:
         return urandom(16)
 
-    if len(nonce) != 32 or any(i not in hexdigits for i in nonce):
-        Log.logError("Nonce must be 16 valid bytes in hex format (e.g. 7468697369736d616c6963696f757321)")
+    if any(i not in hexdigits for i in nonce) or len(nonce) % 2 == 1 or len(nonce) < 2:
+        Log.logError("Nonce must be valid bytes in hex format.")
+        exit()
+
+    nonce_bytes = len(nonce) // 2
+    expected = 8 if encrypt_type in ("chacha20", "salsa20") else 16
+    if nonce_bytes != expected:
+        Log.logError(f"{encrypt_type or 'cipher'} requires a {expected}-byte nonce (got {nonce_bytes}).")
         exit()
 
     return bytearray.fromhex(nonce)
@@ -173,9 +184,19 @@ def process_encoding(input_bytes, args, encoder):
         input_bytes = encoder.encode(args.encode, input_bytes)
     return input_bytes
 
+def process_decoding(input_bytes, args, encoder):
+    if args.encode:
+        input_bytes = encoder.decode(args.encode, input_bytes)
+    return input_bytes
+
 def process_compression(input_bytes, args, compressor):
     if args.compress:
         input_bytes = compressor.compress(args.compress, input_bytes)
+    return input_bytes
+
+def process_decompression(input_bytes, args, compressor):
+    if args.compress:
+        input_bytes = compressor.decompress(args.compress, input_bytes)
     return input_bytes
 
 def process_encryption(input_bytes, args, cryptor, key, nonce):
@@ -183,18 +204,16 @@ def process_encryption(input_bytes, args, cryptor, key, nonce):
         input_bytes = cryptor.encrypt(args.encrypt, input_bytes, key, nonce)
     return input_bytes
 
+def process_decryption(input_bytes, args, cryptor, key, nonce):
+    if args.encrypt:
+        input_bytes = cryptor.decrypt(args.encrypt, input_bytes, key, nonce)
+    return input_bytes
+
 def main():
     try:
         # Show banner and parse arguments
         show_banner()
         args = parse_args()
-
-        # --------- Config System ---------
-        config_chain = None
-        if exists("config.yaml"):
-            with open("config.yaml", "r") as f:
-                config = yaml.safe_load(f)
-                config_chain = config.get("chain", None)
 
         # --------- Info-only arguments ---------
         if args.formats:
@@ -214,12 +233,12 @@ def main():
 
         validate_input_file(args.input)
 
-        if args.format not in OUTPUT_FORMATS:
-            Log.logError("""Invalid format specified, please specify a valid format e.g.
-                         -f c (--formats gives a list of valid formats)""")
-            exit()
-
-        Log.logSuccess(f"Output format: {args.format}")
+        if not args.decrypt:
+            if args.format not in OUTPUT_FORMATS:
+                Log.logError("""Invalid format specified, please specify a valid format e.g.
+                             -f c (--formats gives a list of valid formats)""")
+                exit()
+            Log.logSuccess(f"Output format: {args.format}")
 
         if args.encrypt and args.encrypt not in CIPHERS:
             Log.logError("""Invalid cipher specified, please specify a valid cipher e.g.
@@ -236,22 +255,25 @@ def main():
                          -c lznt (--compressors gives a list of valid compressors)""")
             exit()
 
-        if args.compress != None:
-            Log.logSuccess(f"Output Compression: {args.compress}")
-        
-        if args.encrypt != None:
-            Log.logSuccess(f"Output Encryption: {args.encrypt}")
-        else:
-            Log.logInfo("No encryption found, defaulting to XOR")
-        
-        if args.encode != None:
-            Log.logSuccess(f"Output Encoding: {args.encode}")
+        Log.logSuccess(f"Output Compression: {args.compress}")
+        Log.logSuccess(f"Output Encryption: {args.encrypt}")
+        Log.logSuccess(f"Output Encoding: {args.encode}")
 
-        key = validate_and_get_key(args.key, args.encrypt)
+        if args.decrypt and args.encrypt and args.key is None:
+            Log.logError("Decryption requires a key (-k). Cannot use a random key.")
+            exit()
+
+        if args.decrypt and args.encrypt in ["aes_128", "aes_ecb", "aes_cbc", "chacha20", "salsa20"] and args.nonce is None:
+            Log.logError("Decryption with this cipher requires a nonce (-n).")
+            exit()
+
+        key = validate_and_get_key(args.key, args.encrypt, args.key_length)
         Log.logSuccess(f"Using key: {hexlify(key).decode()}")
 
-        nonce = validate_and_get_nonce(args.nonce)
-        if args.encrypt == "aes":
+        nonce = validate_and_get_nonce(args.nonce, args.encrypt)
+        if args.encrypt and args.encrypt in ["aes_128", "aes_ecb", "aes_cbc"]:
+            Log.logSuccess(f"Using nonce/IV: {hexlify(nonce).decode()}")
+        elif args.encrypt and args.encrypt in ["chacha20", "salsa20"]:
             Log.logSuccess(f"Using nonce: {hexlify(nonce).decode()}")
 
         Log.logDebug("Arguments validated")
@@ -265,45 +287,20 @@ def main():
         compressor = Compress()
         encoder = Encode()
 
-        # If config.yaml exists and chain is specified, use it
-        if config_chain:
-            for step in config_chain:
-                step_type = step.get("type")
-                method = step.get("method")
-                if step_type == "compress":
-                    Log.logSuccess(f"Output Compression: {method}")
-                    input_bytes = compressor.compress(method, input_bytes)
-                elif step_type == "encrypt":
-                    Log.logSuccess(f"Output Encryption: {method}")
-                    step_key = step.get("key")
-                    step_nonce = step.get("nonce")
-                    import re
-                    def to_hex_str(val):
-                        if val is None:
-                            return None
-                        if isinstance(val, int):
-                            return format(val, 'x')
-                        return str(val)
-                    def validate_hex(val, expected_len, name):
-                        if val is None:
-                            return None
-                        hex_str = to_hex_str(val)
-                        if not re.fullmatch(r'[0-9a-fA-F]+', hex_str):
-                            Log.logError(f"{name} in config.yaml must be a valid hex string.")
-                            exit()
-                        if len(hex_str) != expected_len:
-                            Log.logError(f"{name} in config.yaml must be {expected_len} hex digits ({expected_len//2} bytes). Got {len(hex_str)}.")
-                            exit()
-                        return hex_str
-                    use_key = bytearray.fromhex(validate_hex(step_key, 32, "key")) if step_key else key
-                    use_nonce = bytearray.fromhex(validate_hex(step_nonce, 32, "nonce")) if step_nonce else nonce
-                    input_bytes = cryptor.encrypt(method, input_bytes, use_key, use_nonce)
-                elif step_type == "encode":
-                    Log.logSuccess(f"Output Encoder: {method}")
-                    input_bytes = encoder.encode(method, input_bytes)
-                else:
-                    Log.logError(f"Unknown step type in config: {step_type}")
-                    exit()
+        if args.decrypt:
+            if args.encode:
+                logging.info("Decoding Shellcode")
+                input_bytes = process_decoding(input_bytes, args, encoder)
+
+            if args.encrypt:
+                logging.info("Decrypting Shellcode")
+                input_bytes = process_decryption(input_bytes, args, cryptor, key, nonce)
+
+            if args.compress:
+                logging.info("Decompressing Shellcode")
+                input_bytes = process_decompression(input_bytes, args, compressor)
+
+            Log.logSuccess(f"Successfully decrypted input file ({len(input_bytes)} bytes)")
         else:
             if args.compress:
                 logging.info("Compressing Shellcode")
@@ -312,23 +309,29 @@ def main():
             if args.encrypt:
                 logging.info("Encrypting Shellcode")
                 input_bytes = process_encryption(input_bytes, args, cryptor, key, nonce)
+                if args.encrypt in ["chacha20", "salsa20"]:
+                    Log.logSuccess(f"Generated nonce: {hexlify(cryptor.nonce).decode()}")
 
             if args.encode:
                 logging.info("Encoding Shellcode")
                 input_bytes = process_encoding(input_bytes, args, encoder)
 
-        Log.logSuccess(f"Successfully processed input file ({len(input_bytes)} bytes)")
-        Log.logInfo("Deobfuscation Routine: Decode -> Decrypt -> Decompress\n")
+            Log.logSuccess(f"Successfully processed input file ({len(input_bytes)} bytes)")
+            Log.logInfo("Deobfuscation Routine: Decode -> Decrypt -> Decompress\n")
 
         # --------- Output Generation ---------
-        arrays = {"key": key}
-        if args.encrypt and args.encrypt in ["aes_128", "aes_ecb", "aes_cbc"]:
-            arrays["nonce"] = nonce
-        arrays[args.array] = input_bytes
+        if args.decrypt:
+            output = bytearray(input_bytes)
+        else:
+            arrays = {"key": key}
+            if args.encrypt and args.encrypt in ["aes_128", "aes_ecb", "aes_cbc"]:
+                arrays["nonce"] = nonce
+            elif args.encrypt and args.encrypt in ["chacha20", "salsa20"]:
+                arrays["nonce"] = cryptor.nonce
+            arrays[args.array] = input_bytes
 
-        # Generate formatted output
-        shellcode_formatter = ShellcodeFormatter()
-        output = shellcode_formatter.generate(args.format, arrays)
+            shellcode_formatter = ShellcodeFormatter()
+            output = shellcode_formatter.generate(args.format, arrays)
 
         # --------- Output ---------
         if args.output is None:
