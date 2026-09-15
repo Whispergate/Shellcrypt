@@ -3,3 +3,4 @@ pycryptodome
 argparse
 pyfiglet
 lznt1
+pyyaml
