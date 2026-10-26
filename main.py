@@ -21,6 +21,7 @@ from string import hexdigits
 
 from utils.crypters import Encode, Encrypt, Compress, ShellcodeFormatter
 from utils.logging import Log
+from utils.steganography import Steganography
 
 theme = Theme({
     "success" : "spring_green3",
@@ -82,8 +83,8 @@ def parse_args():
 
     argparser = argparse.ArgumentParser(prog="shellcrypt")
 
-    # Required argument: Input file
-    argparser.add_argument("-i", "--input", help="Path to file to be encrypted.", required=True)
+    # Input file (required unless using --steg-extract or --steg-capacity)
+    argparser.add_argument("-i", "--input", help="Path to file to be encrypted.")
 
     # Encryption related options
     argparser.add_argument("-e", "--encrypt", default=None, help="Encryption method to use, default None.")
@@ -119,6 +120,16 @@ def parse_args():
 
     # Specify key length (if greater than 16)
     argparser.add_argument("--key-length", type=int, default=16, help="Specify the key length in bytes (default is 16).")
+
+    # Steganography options
+    argparser.add_argument("--steg-embed", metavar="IMAGE",
+                           help="Embed output into an image (PNG/BMP/ICO) via LSB steganography.")
+    argparser.add_argument("--steg-extract", metavar="IMAGE",
+                           help="Extract hidden payload from a steganographic image.")
+    argparser.add_argument("--steg-bits", type=int, default=1, choices=[1, 2, 3, 4],
+                           help="LSB bits per channel (1=stealthiest, 4=max capacity). Default 1.")
+    argparser.add_argument("--steg-capacity", metavar="IMAGE",
+                           help="Show the payload capacity of an image and exit.")
 
     return argparser.parse_args()
 
@@ -228,6 +239,29 @@ def main():
             print(VERSION)
             exit()
 
+        # --------- Steganography: capacity check ---------
+        if args.steg_capacity:
+            steg = Steganography(bits_per_channel=args.steg_bits)
+            cap = steg.capacity(args.steg_capacity)
+            console.print(f"[bold]Image:[/bold] {args.steg_capacity}")
+            console.print(f"[bold]Bits per channel:[/bold] {args.steg_bits}")
+            console.print(f"[bold]Max payload:[/bold] {cap} bytes ({cap / 1024:.1f} KB)")
+            exit()
+
+        # --------- Steganography: extract mode ---------
+        if args.steg_extract:
+            steg = Steganography(bits_per_channel=args.steg_bits)
+            extracted = steg.extract(args.steg_extract)
+            Log.logSuccess(f"Extracted {len(extracted)} bytes from {args.steg_extract}")
+
+            if args.output:
+                with open(args.output, "wb") as f:
+                    f.write(extracted)
+                Log.logSuccess(f"Payload written to '{args.output}'")
+            else:
+                console.print(f"[info]Payload hex:[/info] {extracted.hex()}")
+            exit()
+
         # --------- Argument Validation ---------
         Log.logDebug(msg="Validating arguments")
 
@@ -332,6 +366,25 @@ def main():
 
             shellcode_formatter = ShellcodeFormatter()
             output = shellcode_formatter.generate(args.format, arrays)
+
+        # --------- Steganography: embed mode ---------
+        if args.steg_embed:
+            # Get raw bytes for embedding (use the processed shellcode, not formatted text)
+            if isinstance(output, bytearray):
+                embed_payload = bytes(output)
+            else:
+                # If formatted output, embed the raw processed bytes instead
+                embed_payload = bytes(input_bytes)
+
+            if args.output is None:
+                Log.logError("Steganography embed requires an output file (-o output.png)")
+                exit()
+
+            steg = Steganography(bits_per_channel=args.steg_bits)
+            steg.embed(embed_payload, args.steg_embed, args.output)
+            Log.logSuccess(f"Shellcode embedded into '{args.output}'")
+            Log.logInfo(f"Extract with: shellcrypt --steg-extract {args.output} --steg-bits {args.steg_bits} -o payload.bin")
+            exit()
 
         # --------- Output ---------
         if args.output is None:
